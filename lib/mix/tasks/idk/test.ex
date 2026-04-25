@@ -1,14 +1,14 @@
-defmodule Mix.Tasks.Test.Tprof do
+defmodule Mix.Tasks.Idk.Test do
   @moduledoc """
   Profiles an ExUnit run with Erlang/OTP's experimental `:tprof`.
 
-      mix test.tprof test/path_test.exs:42 --type call_memory
+      mix idk test test/path_test.exs:42 --type call_memory
 
   The task forwards normal test file and line arguments to `mix test`, profiles
   the whole run, and writes:
 
-    * `_build/test/tprof/report.txt` - a readable combined-function report
-    * `_build/test/tprof/profile.etf` - raw `:tprof` data as an Erlang term binary
+    * `_build/test/idk/report.txt` - a readable combined-function report
+    * `_build/test/idk/profile.etf` - raw `:tprof` data as an Erlang term binary
 
   Options:
 
@@ -52,14 +52,14 @@ defmodule Mix.Tasks.Test.Tprof do
   end
 
   defp run_tprof(opts, test_args) do
-    unless ExUnitTProf.available?() do
+    unless Idk.available?() do
       Mix.raise("Erlang/OTP :tprof is not available; use Erlang/OTP 27 or newer")
     end
 
     Mix.shell().info("Profiling `mix test #{Enum.join(test_args, " ")}` with :tprof #{opts.type}")
 
     {result, raw_profile, inspected_profile} =
-      ExUnitTProf.profile(opts.type, fn ->
+      Idk.profile(opts.type, fn ->
         Mix.Task.reenable("test")
         Mix.Task.run("test", test_args)
       end)
@@ -80,7 +80,7 @@ defmodule Mix.Tasks.Test.Tprof do
     trigger = trace_trigger(opts)
 
     {result, profile} =
-      ExUnitTProf.TraceFlame.profile(
+      Idk.TraceFlame.profile(
         fn ->
           Mix.Task.reenable("test")
           Mix.Task.run("test", test_args)
@@ -89,7 +89,7 @@ defmodule Mix.Tasks.Test.Tprof do
         trigger: trigger
       )
 
-    paths = ExUnitTProf.FlameWriter.write_all!(opts.flame_dir, profile)
+    paths = Idk.FlameWriter.write_all!(opts.flame_dir, profile)
 
     Mix.shell().info("Wrote folded stacks to #{paths.folded}")
     Mix.shell().info("Wrote Speedscope profile to #{paths.speedscope}")
@@ -105,7 +105,7 @@ defmodule Mix.Tasks.Test.Tprof do
     {parsed, test_args} = consume_options(args, [], [])
 
     type = parse_type!(Keyword.get(parsed, :type, Atom.to_string(@default_type)))
-    output_dir = Path.join(Mix.Project.build_path(), "tprof")
+    output_dir = Path.join(Mix.Project.build_path(), "idk")
 
     opts = %{
       type: type,
@@ -233,7 +233,7 @@ defmodule Mix.Tasks.Test.Tprof do
   end
 
   defp parse_type!(type) do
-    case ExUnitTProf.parse_type(type) do
+    case Idk.parse_type(type) do
       {:ok, type} ->
         type
 
@@ -247,7 +247,7 @@ defmodule Mix.Tasks.Test.Tprof do
 
     File.write!(
       path,
-      ExUnitTProf.Report.render(inspected_profile, limit: limit, test_args: test_args) <> "\n"
+      Idk.Report.render(inspected_profile, limit: limit, test_args: test_args) <> "\n"
     )
   end
 

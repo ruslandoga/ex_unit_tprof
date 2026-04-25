@@ -1,4 +1,4 @@
-defmodule ExUnitTProf do
+defmodule Idk do
   @compile {:no_warn_undefined, {:tprof, :profile, 2}}
   @compile {:no_warn_undefined, {:tprof, :inspect, 3}}
 
@@ -19,7 +19,7 @@ defmodule ExUnitTProf do
   end
 
   @doc """
-  Parses a profiling type accepted by `mix test.tprof`.
+  Parses a profiling type accepted by `mix idk test`.
   """
   def parse_type("call_count"), do: {:ok, :call_count}
   def parse_type("call_time"), do: {:ok, :call_time}

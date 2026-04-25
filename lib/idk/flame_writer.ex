@@ -1,4 +1,4 @@
-defmodule ExUnitTProf.FlameWriter do
+defmodule Idk.FlameWriter do
   @moduledoc false
 
   def write_all!(output_dir, profile) do
@@ -55,7 +55,7 @@ defmodule ExUnitTProf.FlameWriter do
       profiles: [
         %{
           type: "evented",
-          name: "mix test.tprof trace",
+          name: "mix idk test trace",
           unit: "microseconds",
           startValue: 0,
           endValue: duration(converted_events),
@@ -65,7 +65,7 @@ defmodule ExUnitTProf.FlameWriter do
       activeProfileIndex: 0
     }
 
-    ExUnitTProf.FlameWriter.JasonLike.encode!(data) <> "\n"
+    Idk.FlameWriter.JasonLike.encode!(data) <> "\n"
   end
 
   def svg(folded) do
@@ -85,7 +85,7 @@ defmodule ExUnitTProf.FlameWriter do
         rect { shape-rendering: crispEdges; stroke: #ffffff; stroke-width: .5; }
       </style>
       <rect width="100%" height="100%" fill="#ffffff" />
-      <text x="12" y="24" font-size="16" font-weight="700">ExUnit trace flamegraph</text>
+      <text x="12" y="24" font-size="16" font-weight="700">Idk trace flamegraph</text>
       #{frames}
     </svg>
     """
@@ -179,7 +179,7 @@ defmodule ExUnitTProf.FlameWriter do
   end
 end
 
-defmodule ExUnitTProf.FlameWriter.JasonLike do
+defmodule Idk.FlameWriter.JasonLike do
   @moduledoc false
 
   def encode!(value) when is_map(value) do

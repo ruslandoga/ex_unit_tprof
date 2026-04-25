@@ -1,4 +1,4 @@
-defmodule ExUnitTProf.Report do
+defmodule Idk.Report do
   @moduledoc false
 
   @headers %{
@@ -8,7 +8,7 @@ defmodule ExUnitTProf.Report do
   }
 
   @doc """
-  Renders the combined `:tprof.inspect/3` result returned by `ExUnitTProf.profile/2`.
+  Renders the combined `:tprof.inspect/3` result returned by `Idk.profile/2`.
   """
   def render(inspected, opts \\ []) do
     {type, total, rows} = normalize(inspected)
@@ -18,7 +18,7 @@ defmodule ExUnitTProf.Report do
     selected_rows = Enum.take(rows, limit)
 
     [
-      "ExUnit tprof report",
+      "Idk tprof report",
       "====================",
       "",
       "Profile type: #{type}",

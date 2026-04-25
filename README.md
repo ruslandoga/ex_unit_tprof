@@ -1,17 +1,17 @@
-# ExUnitTProf
+# Idk
 
-Prototype Mix task for profiling ExUnit runs with Erlang/OTP `:tprof`.
+Prototype Mix task for profiling BEAM code paths with Erlang/OTP `:tprof`
+and trace-based flamegraph artifacts.
 
-This is intentionally outside Elixir core. The first milestone is to learn
-whether a third-party wrapper around `mix test` is useful enough before
-proposing any upstream ExUnit surface.
+The first workflow is ExUnit-oriented because test runs are a practical place to
+dogfood profiling, but the tracing and flamegraph pieces are not ExUnit-specific.
 
 ## Usage
 
-Run the selected tests through `mix test.tprof`:
+Run the selected tests through `mix idk test`:
 
 ```sh
-mix test.tprof test/path_test.exs:42 --type call_memory
+mix idk test test/path_test.exs:42 --type call_memory
 ```
 
 Supported profile types:
@@ -27,20 +27,20 @@ For example, `--seed`, `--trace`, file paths, and `file:line` selectors are
 passed through.
 
 ```sh
-mix test.tprof test/my_test.exs:12 --seed 123 --type call_time
+mix idk test test/my_test.exs:12 --seed 123 --type call_time
 ```
 
 Outputs default to:
 
 ```text
-_build/test/tprof/report.txt
-_build/test/tprof/profile.etf
+_build/test/idk/report.txt
+_build/test/idk/profile.etf
 ```
 
 Override them with:
 
 ```sh
-mix test.tprof --report tmp/tprof.txt --artifact tmp/tprof.etf --type call_memory
+mix idk test --report tmp/idk.txt --artifact tmp/idk.etf --type call_memory
 ```
 
 `profile.etf` is `:erlang.term_to_binary/1` output for the raw `:tprof`
@@ -56,7 +56,7 @@ flamegraph.
 For stack-shaped output, this prototype also has an experimental trace mode:
 
 ```sh
-mix test.tprof test/path_test.exs:42 --flamegraph
+mix idk test test/path_test.exs:42 --flamegraph
 ```
 
 This uses `:erlang.trace/3` with `:call`, `:return_to`, timestamps, and
@@ -65,7 +65,7 @@ loaded modules under the current project's application module prefix. You can
 narrow or expand that explicitly:
 
 ```sh
-mix test.tprof test/path_test.exs:42 --flamegraph --trace-module MyApp.Context
+mix idk test test/path_test.exs:42 --flamegraph --trace-module MyApp.Context
 ```
 
 You can also gate trace capture with telemetry events. This is useful when a
@@ -73,7 +73,7 @@ test exercises a broad flow, but you only want the flamechart for a specific
 request, query, job, or client operation:
 
 ```sh
-mix test.tprof test/path_test.exs:42 \
+mix idk test test/path_test.exs:42 \
   --flamegraph \
   --trace-module MyApp.Context \
   --trace-start-event my_app.profile.start \
@@ -89,9 +89,9 @@ around the code path you want to dogfood.
 It writes:
 
 ```text
-_build/test/tprof/flame/stacks.folded
-_build/test/tprof/flame/speedscope.json
-_build/test/tprof/flame/flamegraph.svg
+_build/test/idk/flame/stacks.folded
+_build/test/idk/flame/speedscope.json
+_build/test/idk/flame/flamegraph.svg
 ```
 
 The folded stack file follows the common `a;b;c count` shape used by many

@@ -1,19 +1,19 @@
-defmodule ExUnitTProfTest do
+defmodule IdkTest do
   use ExUnit.Case
 
   test "parses supported tprof types" do
-    assert ExUnitTProf.parse_type("call_count") == {:ok, :call_count}
-    assert ExUnitTProf.parse_type("call_time") == {:ok, :call_time}
-    assert ExUnitTProf.parse_type("call_memory") == {:ok, :call_memory}
+    assert Idk.parse_type("call_count") == {:ok, :call_count}
+    assert Idk.parse_type("call_time") == {:ok, :call_time}
+    assert Idk.parse_type("call_memory") == {:ok, :call_memory}
   end
 
   test "rejects unsupported tprof types" do
-    assert ExUnitTProf.parse_type("wall_time") == {:error, {:invalid_type, "wall_time"}}
+    assert Idk.parse_type("wall_time") == {:error, {:invalid_type, "wall_time"}}
   end
 
-  test "test.tprof parser separates task options from mix test args" do
+  test "idk test parser separates task options from mix test args" do
     {opts, test_args} =
-      Mix.Tasks.Test.Tprof.parse!([
+      Mix.Tasks.Idk.Test.parse!([
         "test/path_test.exs:42",
         "--seed",
         "123",
@@ -29,11 +29,11 @@ defmodule ExUnitTProfTest do
         "--flame-dir",
         "tmp/flame",
         "--trace-module",
-        "ExUnitTProf",
+        "Idk",
         "--trace-start-event",
-        "ex_unit_tprof.profile.start",
+        "idk.profile.start",
         "--trace-stop-event",
-        "ex_unit_tprof.profile.stop"
+        "idk.profile.stop"
       ])
 
     assert opts.type == :call_memory
@@ -42,9 +42,9 @@ defmodule ExUnitTProfTest do
     assert opts.artifact == "tmp/profile.etf"
     assert opts.flamegraph
     assert opts.flame_dir == "tmp/flame"
-    assert opts.trace_modules == ["ExUnitTProf"]
-    assert opts.trace_start_event == "ex_unit_tprof.profile.start"
-    assert opts.trace_stop_event == "ex_unit_tprof.profile.stop"
+    assert opts.trace_modules == ["Idk"]
+    assert opts.trace_start_event == "idk.profile.start"
+    assert opts.trace_stop_event == "idk.profile.stop"
     assert test_args == ["test/path_test.exs:42", "--seed", "123"]
   end
 
@@ -59,12 +59,12 @@ defmodule ExUnitTProfTest do
     }
 
     report =
-      ExUnitTProf.Report.render(inspected,
+      Idk.Report.render(inspected,
         limit: 1,
         test_args: ["test/path_test.exs:42"]
       )
 
-    assert report =~ "ExUnit tprof report"
+    assert report =~ "Idk tprof report"
     assert report =~ "Profile type: call_memory"
     assert report =~ "Test args: test/path_test.exs:42"
     assert report =~ "Total allocated words: 12"
@@ -88,39 +88,38 @@ defmodule ExUnitTProfTest do
       ]
     }
 
-    assert ExUnitTProf.FlameWriter.folded(profile.folded) =~ "A.f/1;B.g/2 3"
+    assert Idk.FlameWriter.folded(profile.folded) =~ "A.f/1;B.g/2 3"
 
-    speedscope = ExUnitTProf.FlameWriter.speedscope(profile.events)
+    speedscope = Idk.FlameWriter.speedscope(profile.events)
     assert speedscope =~ ~s("type":"evented")
     assert speedscope =~ ~s("name":"A.f/1")
 
-    svg = ExUnitTProf.FlameWriter.svg(profile.folded)
+    svg = Idk.FlameWriter.svg(profile.folded)
     assert svg =~ "<svg"
-    assert svg =~ "ExUnit trace flamegraph"
+    assert svg =~ "Idk trace flamegraph"
     assert svg =~ "<rect"
   end
 
   test "trace flame can be gated by telemetry events" do
     {_result, profile} =
-      ExUnitTProf.TraceFlame.profile(
+      Idk.TraceFlame.profile(
         fn ->
-          :telemetry.execute([:ex_unit_tprof, :profile, :start], %{system_time: 1}, %{})
-          ExUnitTProf.parse_type("call_count")
-          :telemetry.execute([:ex_unit_tprof, :profile, :stop], %{duration: 2}, %{})
+          :telemetry.execute([:idk, :profile, :start], %{system_time: 1}, %{})
+          Idk.parse_type("call_count")
+          :telemetry.execute([:idk, :profile, :stop], %{duration: 2}, %{})
         end,
-        [ExUnitTProf],
-        trigger:
-          {:telemetry, [:ex_unit_tprof, :profile, :start], [:ex_unit_tprof, :profile, :stop]}
+        [Idk],
+        trigger: {:telemetry, [:idk, :profile, :start], [:idk, :profile, :stop]}
       )
 
     assert profile.trigger == :telemetry
     assert length(profile.telemetry_events) == 2
-    assert profile.folded["ExUnitTProf.parse_type/1"] == 1
+    assert profile.folded["Idk.parse_type/1"] == 1
   end
 
   test "emits telemetry around profile target work" do
-    :telemetry.execute([:ex_unit_tprof, :profile, :start], %{system_time: 1}, %{})
-    assert ExUnitTProf.parse_type("call_count") == {:ok, :call_count}
-    :telemetry.execute([:ex_unit_tprof, :profile, :stop], %{duration: 2}, %{})
+    :telemetry.execute([:idk, :profile, :start], %{system_time: 1}, %{})
+    assert Idk.parse_type("call_count") == {:ok, :call_count}
+    :telemetry.execute([:idk, :profile, :stop], %{duration: 2}, %{})
   end
 end

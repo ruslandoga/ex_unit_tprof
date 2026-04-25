@@ -1,9 +1,9 @@
-defmodule ExUnitTProf.MixProject do
+defmodule Idk.MixProject do
   use Mix.Project
 
   def project do
     [
-      app: :ex_unit_tprof,
+      app: :idk,
       version: "0.1.0",
       elixir: "~> 1.19",
       start_permanent: Mix.env() == :prod,
@@ -13,7 +13,7 @@ defmodule ExUnitTProf.MixProject do
 
   def cli do
     [
-      preferred_envs: ["test.tprof": :test]
+      preferred_envs: [idk: :test, "idk.test": :test]
     ]
   end
 

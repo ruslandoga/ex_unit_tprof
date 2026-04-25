@@ -1,4 +1,4 @@
-defmodule ExUnitTProf.TraceFlame do
+defmodule Idk.TraceFlame do
   @moduledoc false
 
   @timeout 30_000
@@ -48,7 +48,7 @@ defmodule ExUnitTProf.TraceFlame do
       raise "telemetry-triggered tracing requires the :telemetry application"
     end
 
-    handler_id = "ex-unit-tprof-trace-#{System.unique_integer([:positive])}"
+    handler_id = "idk-trace-#{System.unique_integer([:positive])}"
     parent = self()
 
     handler = &__MODULE__.handle_telemetry_trigger/4
