@@ -20,5 +20,9 @@ erl_crash.dump
 *.ez
 
 # Ignore package tarball (built via "mix hex.build").
-ex_unit_tprof-*.tar
+idk-*.tar
 
+# Generated files from the standalone consumer demo.
+/examples/demo_app/_build/
+/examples/demo_app/deps/
+/examples/demo_app/tmp/
