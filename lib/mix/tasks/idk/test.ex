@@ -17,13 +17,14 @@ defmodule Mix.Tasks.Idk.Test do
     * `--report PATH` - text report path
     * `--artifact PATH` - machine-readable raw profile artifact path
     * `--limit N` - maximum report rows, defaults to 50
-    * `--flamegraph` - use an experimental `:erlang.trace/3` workflow instead
-      of `:tprof` and write folded stacks, Speedscope JSON, and an SVG preview
+    * `--flamegraph` - sample BEAM process stacks instead of using `:tprof` and
+      write folded stacks, Speedscope JSON, and an SVG preview
     * `--flame-dir PATH` - trace flame output directory
     * `--trace-module Module` - module to trace in flamegraph mode; can be
       passed multiple times
-    * `--trace-start-event EVENT` - telemetry event that starts tracing
-    * `--trace-stop-event EVENT` - telemetry event that stops tracing
+    * `--trace-start-event EVENT` - telemetry event that starts sampling
+    * `--trace-stop-event EVENT` - telemetry event that stops sampling
+    * `--sample-interval MS` - stack sampling interval, defaults to 1 ms
 
   Limitations:
 
@@ -79,6 +80,13 @@ defmodule Mix.Tasks.Idk.Test do
     modules = trace_modules(opts)
     trigger = trace_trigger(opts)
 
+    if modules == [] do
+      Mix.raise(
+        "No traceable modules were found for #{inspect(Mix.Project.config()[:app])}. " <>
+          "Pass --trace-module Module explicitly."
+      )
+    end
+
     {result, profile} =
       Idk.TraceFlame.profile(
         fn ->
@@ -86,8 +94,16 @@ defmodule Mix.Tasks.Idk.Test do
           Mix.Task.run("test", test_args)
         end,
         modules,
-        trigger: trigger
+        trigger: trigger,
+        sample_interval: opts.sample_interval
       )
+
+    if profile.sample_count == 0 do
+      Mix.raise(
+        "No stack samples were captured. Selected modules must be active long enough to sample inside the test or telemetry span. " <>
+          "Selected modules: #{Enum.map_join(modules, ", ", &inspect/1)}"
+      )
+    end
 
     paths = Idk.FlameWriter.write_all!(opts.flame_dir, profile)
 
@@ -95,7 +111,11 @@ defmodule Mix.Tasks.Idk.Test do
     Mix.shell().info("Wrote Speedscope profile to #{paths.speedscope}")
     Mix.shell().info("Wrote SVG preview to #{paths.svg}")
     Mix.shell().info("Trace modules: #{Enum.map_join(modules, ", ", &inspect/1)}")
-    Mix.shell().info("Matched #{profile.matched_functions} functions")
+
+    Mix.shell().info(
+      "Captured #{profile.sample_count} stack samples across #{map_size(profile.samples)} BEAM processes"
+    )
+
     print_trigger_info(profile)
 
     result
@@ -116,11 +136,16 @@ defmodule Mix.Tasks.Idk.Test do
       flame_dir: Keyword.get(parsed, :flame_dir, Path.join(output_dir, "flame")),
       trace_modules: Keyword.get_values(parsed, :trace_module),
       trace_start_event: Keyword.get(parsed, :trace_start_event),
-      trace_stop_event: Keyword.get(parsed, :trace_stop_event)
+      trace_stop_event: Keyword.get(parsed, :trace_stop_event),
+      sample_interval: Keyword.get(parsed, :sample_interval, 1)
     }
 
     if opts.limit < 1 do
       Mix.raise("--limit must be greater than 0")
+    end
+
+    if opts.sample_interval < 1 do
+      Mix.raise("--sample-interval must be greater than 0")
     end
 
     {opts, test_args}
@@ -157,6 +182,9 @@ defmodule Mix.Tasks.Idk.Test do
   defp consume_options(["--trace-stop-event"], _parsed, _test_args),
     do: Mix.raise("--trace-stop-event requires a value")
 
+  defp consume_options(["--sample-interval"], _parsed, _test_args),
+    do: Mix.raise("--sample-interval requires a value")
+
   defp consume_options(["--flamegraph" | rest], parsed, test_args) do
     consume_options(rest, [{:flamegraph, true} | parsed], test_args)
   end
@@ -191,6 +219,17 @@ defmodule Mix.Tasks.Idk.Test do
 
   defp consume_options(["--trace-stop-event=" <> value | rest], parsed, test_args) do
     consume_options(rest, [{:trace_stop_event, value} | parsed], test_args)
+  end
+
+  defp consume_options(["--sample-interval", value | rest], parsed, test_args) do
+    case Integer.parse(value) do
+      {interval, ""} -> consume_options(rest, [{:sample_interval, interval} | parsed], test_args)
+      _ -> Mix.raise("--sample-interval must be an integer")
+    end
+  end
+
+  defp consume_options(["--sample-interval=" <> value | rest], parsed, test_args) do
+    consume_options(["--sample-interval", value | rest], parsed, test_args)
   end
 
   defp consume_options(["--type", value | rest], parsed, test_args) do
@@ -257,10 +296,10 @@ defmodule Mix.Tasks.Idk.Test do
   end
 
   defp trace_modules(%{trace_modules: []}) do
-    prefix = Mix.Project.config()[:app] |> Atom.to_string() |> Macro.camelize()
+    app = Mix.Project.config()[:app]
+    prefix = app |> Atom.to_string() |> Macro.camelize()
 
-    :code.all_loaded()
-    |> Enum.map(&elem(&1, 0))
+    (Application.spec(app, :modules) || [])
     |> Enum.filter(
       &(module_prefix(&1) == prefix or String.starts_with?(module_prefix(&1), prefix <> "."))
     )

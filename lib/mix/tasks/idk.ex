@@ -11,6 +11,7 @@ defmodule Mix.Tasks.Idk do
 
   @impl Mix.Task
   def run(["test" | args]) do
+    Mix.env(:test)
     Mix.Task.run("idk.test", args)
   end
 

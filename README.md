@@ -53,16 +53,17 @@ experiments can inspect the data without re-running the test suite.
 function tables, but not enough to reconstruct full call stacks for a real
 flamegraph.
 
-For stack-shaped output, this prototype also has an experimental trace mode:
+For stack-shaped output, this prototype also has an experimental sampling mode:
 
 ```sh
 mix idk test test/path_test.exs:42 --flamegraph
 ```
 
-This uses `:erlang.trace/3` with `:call`, `:return_to`, timestamps, and
-`set_on_spawn` around the selected `mix test` invocation. By default it traces
-loaded modules under the current project's application module prefix. You can
-narrow or expand that explicitly:
+This periodically samples process stack traces. An isolated OTP 27 trace session
+tracks processes spawned by the selected `mix test` invocation so their stacks
+are sampled too. By default Idk selects modules from the current Mix
+application; a sample is kept when its stack passes through one of those
+modules. You can narrow or expand that explicitly:
 
 ```sh
 mix idk test test/path_test.exs:42 --flamegraph --trace-module MyApp.Context
@@ -80,9 +81,9 @@ mix idk test test/path_test.exs:42 \
   --trace-stop-event my_app.profile.stop
 ```
 
-The telemetry handler starts tracing in the process that emits the start event
-and stops tracing in the process that emits the stop event. With
-`set_on_spawn`, children spawned after the start event are traced too. This
+The telemetry handler starts sampling the process that emits the start event
+and stops sampling when the stop event is emitted. The trace session discovers
+children spawned after the start event and samples them too. This
 keeps the feature out of ExUnit while making it easy to add local instrumentation
 around the code path you want to dogfood.
 
@@ -96,18 +97,39 @@ _build/test/idk/flame/flamegraph.svg
 
 The folded stack file follows the common `a;b;c count` shape used by many
 flamegraph tools. `speedscope.json` is intended for <https://www.speedscope.app>
-and can be viewed as a flame chart or sandwich view. The SVG is a lightweight
-preview, not a replacement for a full interactive flamegraph viewer.
+and can be viewed as a flame chart or sandwich view. Each traced BEAM process is
+written as a separate selectable Speedscope profile so concurrent stacks remain
+valid. The SVG is a lightweight preview, not a replacement for a full
+interactive flamegraph viewer.
 
 For viewer integration, the safest default is to write a local Speedscope file
-and print the path. Uploading client traces to a hosted service should be an
-explicit opt-in because function names, module names, metadata, and call paths
-can expose private application details. A future `profile_and_view` helper could
-open Speedscope locally in the browser and ask before any upload-style workflow.
+and print the path. Speedscope processes files selected from disk entirely in
+the browser rather than uploading them, but profiles still contain private
+module names and call paths and should be handled like client data. A future
+`profile_and_view` helper could open Speedscope locally in the browser.
 
-The trace mode is intentionally separate from the `:tprof` mode because both
-install VM trace patterns. Running them together would make the initial results
-harder to reason about.
+The sampling mode is intentionally separate from the `:tprof` mode so each
+artifact has one clear measurement model.
+
+## Demo Project
+
+`examples/demo_app` is a standalone consumer with nested work spread over
+multiple `Task` processes. It exercises both immediate and telemetry-gated
+capture:
+
+```sh
+cd examples/demo_app
+mix deps.get
+mix idk test test/demo_app_test.exs:4 --flamegraph
+mix idk test test/demo_app_test.exs:8 \
+  --flamegraph \
+  --trace-start-event demo_app.workload.start \
+  --trace-stop-event demo_app.workload.stop
+```
+
+Idk discovers modules in the current Mix application by default. Use repeated
+`--trace-module` options when the interesting code belongs to dependencies or
+when a narrower capture would be easier to inspect.
 
 ## Current Design
 
@@ -138,11 +160,11 @@ Profiling adds overhead and can perturb timings, scheduling, allocation, and
 process behavior. Treat the report as directional evidence, not exact
 benchmarking data.
 
-Trace flamegraph mode is even noisier than the `:tprof` table path. It traces
-function calls, can produce large artifacts, and currently samples stack shape
-from traced call events rather than using a low-overhead statistical sampler.
-Telemetry-gated tracing reduces the capture window but does not remove tracing
-overhead while the gate is open.
+Flamegraph mode is statistical: short-lived functions may not appear in every
+run, and weights are sampling intervals rather than exact function durations.
+The default interval is 1 ms and can be changed with `--sample-interval MS`.
+Smaller intervals increase overhead and artifact size. Telemetry gating reduces
+both by limiting the capture window.
 
 `:tprof` is experimental in Erlang/OTP 27. Output shape, semantics, and
 performance characteristics may change across OTP releases.

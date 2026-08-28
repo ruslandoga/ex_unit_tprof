@@ -4,55 +4,71 @@ defmodule Idk.TraceFlame do
   @timeout 30_000
 
   def profile(fun, modules, opts \\ []) when is_function(fun, 0) and is_list(modules) do
+    modules = ensure_modules!(modules)
+    interval_ms = Keyword.get(opts, :sample_interval, 1)
     owner = self()
-    tracer = spawn_link(fn -> tracer_loop(owner, %{}) end)
 
-    matched = enable_patterns(modules)
-    trigger = Keyword.get(opts, :trigger, :immediate)
+    sampler =
+      spawn_link(fn ->
+        sampler_loop(owner, %{
+          active: false,
+          interval_ms: interval_ms,
+          modules: MapSet.new(modules),
+          pids: MapSet.new(),
+          samples: %{},
+          timer: nil
+        })
+      end)
 
     try do
-      {result, trigger_info} = run_with_trigger(fun, tracer, trigger)
-      disable_patterns(modules)
-      send(tracer, {:stop, self()})
+      session = :trace.session_create(:idk, sampler, [])
+      trigger = Keyword.get(opts, :trigger, :immediate)
 
-      receive do
-        {:trace_flame, ^tracer, profile} ->
-          profile =
-            profile
-            |> Map.put(:matched_functions, matched)
-            |> Map.merge(trigger_info)
+      try do
+        {result, trigger_info} = run_with_trigger(fun, session, sampler, trigger)
+        stop_sampling(session, sampler)
+        send(sampler, {:drain, session})
 
-          {result, profile}
+        receive do
+          {:trace_flame, ^sampler, profile} ->
+            profile =
+              profile
+              |> Map.put(:traced_modules, modules)
+              |> Map.merge(trigger_info)
+
+            {result, profile}
+        after
+          @timeout ->
+            raise "timed out waiting for sampled flame data"
+        end
       after
-        @timeout ->
-          raise "timed out waiting for trace flame data"
+        :trace.session_destroy(session)
       end
     after
-      :erlang.trace(self(), false, [:call, :return_to, :procs, :set_on_spawn])
-      disable_patterns(modules)
+      Process.unlink(sampler)
+      Process.exit(sampler, :kill)
     end
   end
 
-  defp run_with_trigger(fun, tracer, :immediate) do
-    enable_process_trace(tracer)
+  defp run_with_trigger(fun, session, sampler, :immediate) do
+    start_sampling(session, sampler)
 
     try do
       {fun.(), %{trigger: :immediate}}
     after
-      disable_process_trace()
+      stop_sampling(session, sampler)
     end
   end
 
-  defp run_with_trigger(fun, tracer, {:telemetry, start_event, stop_event}) do
+  defp run_with_trigger(fun, session, sampler, {:telemetry, start_event, stop_event}) do
     unless Code.ensure_loaded?(:telemetry) do
-      raise "telemetry-triggered tracing requires the :telemetry application"
+      raise "telemetry-triggered sampling requires the :telemetry application"
     end
 
     handler_id = "idk-trace-#{System.unique_integer([:positive])}"
     parent = self()
-
     handler = &__MODULE__.handle_telemetry_trigger/4
-    config = {parent, tracer, start_event, stop_event}
+    config = {parent, session, sampler, start_event, stop_event}
 
     :ok =
       apply(:telemetry, :attach_many, [handler_id, [start_event, stop_event], handler, config])
@@ -71,7 +87,27 @@ defmodule Idk.TraceFlame do
       }
     after
       apply(:telemetry, :detach, [handler_id])
-      disable_process_trace()
+      stop_sampling(session, sampler)
+    end
+  end
+
+  def handle_telemetry_trigger(
+        event,
+        measurements,
+        metadata,
+        {parent, session, sampler, start_event, stop_event}
+      ) do
+    cond do
+      event == start_event ->
+        start_sampling(session, sampler)
+        send(parent, {:trace_flame_telemetry, :start, event, measurements, metadata})
+
+      event == stop_event ->
+        send(parent, {:trace_flame_telemetry, :stop, event, measurements, metadata})
+        stop_sampling(session, sampler)
+
+      true ->
+        :ok
     end
   end
 
@@ -88,130 +124,156 @@ defmodule Idk.TraceFlame do
           | events
         ])
     after
-      0 ->
-        Enum.reverse(events)
+      0 -> Enum.reverse(events)
     end
   end
 
-  def handle_telemetry_trigger(
-        event,
-        measurements,
-        metadata,
-        {parent, tracer, start_event, stop_event}
-      ) do
-    cond do
-      event == start_event ->
-        enable_process_trace(tracer)
-        send(parent, {:trace_flame_telemetry, :start, event, measurements, metadata})
-
-      event == stop_event ->
-        send(parent, {:trace_flame_telemetry, :stop, event, measurements, metadata})
-        disable_process_trace()
-
-      true ->
-        :ok
-    end
+  defp start_sampling(session, sampler) do
+    :trace.process(session, self(), true, [:procs, :set_on_spawn, :monotonic_timestamp])
+    send(sampler, {:start_sampling, self()})
   end
 
-  defp enable_process_trace(tracer) do
-    :erlang.trace(self(), true, [
-      :call,
-      :return_to,
-      :procs,
-      :set_on_spawn,
-      :timestamp,
-      {:tracer, tracer}
-    ])
+  defp stop_sampling(session, sampler) do
+    :trace.process(session, :all, false, [:procs, :set_on_spawn])
+    send(sampler, :stop_sampling)
   end
 
-  defp disable_process_trace do
-    :erlang.trace(self(), false, [:call, :return_to, :procs, :set_on_spawn])
-  end
+  defp ensure_modules!(modules) do
+    Enum.map(modules, fn module ->
+      case Code.ensure_loaded(module) do
+        {:module, ^module} ->
+          module
 
-  defp enable_patterns(modules) do
-    Enum.reduce(modules, 0, fn module, acc ->
-      acc + :erlang.trace_pattern({module, :_, :_}, true, [:local])
+        {:error, reason} ->
+          raise "could not load sampled module #{inspect(module)}: #{inspect(reason)}"
+      end
     end)
   end
 
-  defp disable_patterns(modules) do
-    Enum.each(modules, fn module ->
-      :erlang.trace_pattern({module, :_, :_}, false, [:local])
-    end)
-  end
-
-  defp tracer_loop(owner, state) do
+  defp sampler_loop(owner, state) do
     receive do
-      {:trace_ts, pid, :call, mfa, timestamp} ->
-        tracer_loop(owner, call(state, pid, mfa, timestamp))
+      {:start_sampling, pid} ->
+        state = %{state | active: true, pids: MapSet.put(state.pids, pid)}
+        sampler_loop(owner, state |> sample() |> schedule_sample())
 
-      {:trace_ts, pid, :return_to, mfa, timestamp} ->
-        tracer_loop(owner, return_to(state, pid, mfa, timestamp))
+      :stop_sampling ->
+        sampler_loop(owner, cancel_sample(state))
 
-      {:stop, caller} ->
-        send(owner, {:trace_flame, self(), finish(state)})
-        send(caller, {:trace_flame_stopped, self()})
+      :sample_tick ->
+        state = %{state | timer: nil}
+
+        sampler_loop(
+          owner,
+          if(state.active, do: state |> sample() |> schedule_sample(), else: state)
+        )
+
+      {:trace_ts, _parent, :spawn, child, _mfa, _timestamp} ->
+        sampler_loop(owner, %{state | pids: MapSet.put(state.pids, child)})
+
+      {:trace_ts, pid, :exit, _reason, _timestamp} ->
+        sampler_loop(owner, %{state | pids: MapSet.delete(state.pids, pid)})
+
+      {:drain, session} ->
+        reference = :trace.delivered(session, :all)
+        drain_loop(owner, state, reference)
 
       _other ->
-        tracer_loop(owner, state)
+        sampler_loop(owner, state)
     end
   end
 
-  defp call(state, pid, mfa, timestamp) do
-    frame = format_mfa(mfa)
-    stack = Map.get(state, {:stack, pid}, [])
-    new_stack = [frame | stack]
-    folded_key = new_stack |> Enum.reverse() |> Enum.join(";")
-    started_at = monotonic_us(timestamp)
-
-    state
-    |> Map.put({:stack, pid}, new_stack)
-    |> Map.update(
-      :folded,
-      %{folded_key => 1},
-      &Map.update(&1, folded_key, 1, fn count -> count + 1 end)
-    )
-    |> Map.update(
-      :events,
-      [{:open, pid, frame, started_at}],
-      &[{:open, pid, frame, started_at} | &1]
-    )
+  defp schedule_sample(%{timer: nil} = state) do
+    %{state | timer: Process.send_after(self(), :sample_tick, state.interval_ms)}
   end
 
-  defp return_to(state, pid, mfa, timestamp) do
-    case Map.get(state, {:stack, pid}, []) do
-      [] ->
-        state
+  defp schedule_sample(state), do: state
 
-      [_frame | rest] ->
-        at = monotonic_us(timestamp)
+  defp cancel_sample(%{timer: nil} = state), do: %{state | active: false}
 
-        state
-        |> Map.put({:stack, pid}, rest)
-        |> Map.update(
-          :events,
-          [{:close, pid, format_mfa(mfa), at}],
-          &[{:close, pid, format_mfa(mfa), at} | &1]
-        )
+  defp cancel_sample(state) do
+    Process.cancel_timer(state.timer)
+    %{state | active: false, timer: nil}
+  end
+
+  defp drain_loop(owner, state, reference) do
+    receive do
+      {:trace_ts, _parent, :spawn, child, _mfa, _timestamp} ->
+        drain_loop(owner, %{state | pids: MapSet.put(state.pids, child)}, reference)
+
+      {:trace_ts, pid, :exit, _reason, _timestamp} ->
+        drain_loop(owner, %{state | pids: MapSet.delete(state.pids, pid)}, reference)
+
+      {:trace_delivered, :all, ^reference} ->
+        send(owner, {:trace_flame, self(), finish(state)})
+
+      _other ->
+        drain_loop(owner, state, reference)
     end
   end
+
+  defp sample(state) do
+    at = System.monotonic_time(:nanosecond)
+
+    {pids, samples} =
+      Enum.reduce(state.pids, {state.pids, state.samples}, fn pid, {pids, samples} ->
+        case Process.info(pid, :current_stacktrace) do
+          {:current_stacktrace, stacktrace} ->
+            case relevant_stack(stacktrace, state.modules) do
+              [] ->
+                {pids, samples}
+
+              stack ->
+                sample = %{at: at, stack: stack}
+                {pids, Map.update(samples, pid, [sample], &[sample | &1])}
+            end
+
+          nil ->
+            {MapSet.delete(pids, pid), samples}
+        end
+      end)
+
+    %{state | pids: pids, samples: samples}
+  end
+
+  defp relevant_stack(stacktrace, modules) do
+    stack =
+      stacktrace
+      |> Enum.map(&format_frame/1)
+      |> Enum.reverse()
+
+    case Enum.find_index(stack, fn {module, _frame} -> MapSet.member?(modules, module) end) do
+      nil -> []
+      index -> stack |> Enum.drop(index) |> Enum.map(&elem(&1, 1))
+    end
+  end
+
+  defp format_frame({module, function, arity, _location}) do
+    {module, "#{inspect(module)}.#{function}/#{arity_value(arity)}"}
+  end
+
+  defp format_frame({module, function, arity}) do
+    {module, "#{inspect(module)}.#{function}/#{arity_value(arity)}"}
+  end
+
+  defp arity_value(arity) when is_integer(arity), do: arity
+  defp arity_value(args) when is_list(args), do: length(args)
 
   defp finish(state) do
+    samples = Map.new(state.samples, fn {pid, entries} -> {pid, Enum.reverse(entries)} end)
+
+    folded =
+      Enum.reduce(samples, %{}, fn {_pid, entries}, folded ->
+        Enum.reduce(entries, folded, fn %{stack: stack}, folded ->
+          Map.update(folded, Enum.join(stack, ";"), 1, &(&1 + 1))
+        end)
+      end)
+
     %{
-      folded: Map.get(state, :folded, %{}),
-      events: state |> Map.get(:events, []) |> Enum.reverse()
+      folded: folded,
+      sample_count:
+        Enum.reduce(samples, 0, fn {_pid, entries}, count -> count + length(entries) end),
+      sample_interval_ns: System.convert_time_unit(state.interval_ms, :millisecond, :nanosecond),
+      samples: samples
     }
-  end
-
-  defp format_mfa({module, function, args}) when is_list(args) do
-    "#{inspect(module)}.#{function}/#{length(args)}"
-  end
-
-  defp format_mfa({module, function, arity}) do
-    "#{inspect(module)}.#{function}/#{arity}"
-  end
-
-  defp monotonic_us({mega, sec, micro}) do
-    (mega * 1_000_000 + sec) * 1_000_000 + micro
   end
 end

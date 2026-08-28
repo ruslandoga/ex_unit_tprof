@@ -2,6 +2,11 @@ defmodule Idk.FlameWriter do
   @moduledoc false
 
   def write_all!(output_dir, profile) do
+    if profile.sample_count == 0 do
+      raise ArgumentError,
+            "no stack samples were captured; pass --trace-module for code that runs inside the selected test or span"
+    end
+
     File.mkdir_p!(output_dir)
 
     folded_path = Path.join(output_dir, "stacks.folded")
@@ -9,7 +14,7 @@ defmodule Idk.FlameWriter do
     svg_path = Path.join(output_dir, "flamegraph.svg")
 
     File.write!(folded_path, folded(profile.folded))
-    File.write!(speedscope_path, speedscope(profile.events))
+    File.write!(speedscope_path, speedscope(profile.samples, profile.sample_interval_ns))
     File.write!(svg_path, svg(profile.folded))
 
     %{
@@ -26,46 +31,62 @@ defmodule Idk.FlameWriter do
     |> then(fn text -> text <> "\n" end)
   end
 
-  def speedscope(events) do
+  def speedscope(samples, sample_interval_ns \\ 1_000_000) do
     frames =
-      events
-      |> Enum.flat_map(fn
-        {:open, _pid, frame, _at} -> [frame]
-        {:close, _pid, frame, _at} -> [frame]
-      end)
+      samples
+      |> Map.values()
+      |> List.flatten()
+      |> Enum.flat_map(& &1.stack)
       |> Enum.uniq()
 
     frame_indexes = frames |> Enum.with_index() |> Map.new()
-    start_time = events |> Enum.map(&elem(&1, 3)) |> Enum.min(fn -> 0 end)
 
-    converted_events =
-      Enum.map(events, fn
-        {:open, _pid, frame, at} ->
-          %{type: "O", frame: Map.fetch!(frame_indexes, frame), at: at - start_time}
-
-        {:close, _pid, _frame, at} ->
-          %{type: "C", at: at - start_time}
+    profiles =
+      samples
+      |> Enum.map(fn {pid, process_samples} ->
+        process_profile(pid, process_samples, frame_indexes, sample_interval_ns)
       end)
+      |> Enum.sort_by(fn profile -> length(profile.samples) end, :desc)
 
     data = %{
       "$schema": "https://www.speedscope.app/file-format-schema.json",
+      exporter: "idk",
+      name: "Idk BEAM trace",
       shared: %{
         frames: Enum.map(frames, &%{name: &1})
       },
-      profiles: [
-        %{
-          type: "evented",
-          name: "mix idk test trace",
-          unit: "microseconds",
-          startValue: 0,
-          endValue: duration(converted_events),
-          events: converted_events
-        }
-      ],
+      profiles: profiles,
       activeProfileIndex: 0
     }
 
     Idk.FlameWriter.JasonLike.encode!(data) <> "\n"
+  end
+
+  defp process_profile(pid, samples, frame_indexes, sample_interval_ns) do
+    samples = Enum.sort_by(samples, & &1.at)
+
+    stacks =
+      Enum.map(samples, fn %{stack: stack} ->
+        Enum.map(stack, &Map.fetch!(frame_indexes, &1))
+      end)
+
+    weights = sample_weights(samples, sample_interval_ns)
+
+    %{
+      type: "sampled",
+      name: "BEAM process #{inspect(pid)}",
+      unit: "nanoseconds",
+      startValue: 0,
+      endValue: Enum.sum(weights),
+      samples: stacks,
+      weights: weights
+    }
+  end
+
+  defp sample_weights([_sample], sample_interval_ns), do: [sample_interval_ns]
+
+  defp sample_weights(samples, sample_interval_ns) do
+    List.duplicate(sample_interval_ns, length(samples))
   end
 
   def svg(folded) do
@@ -148,9 +169,6 @@ defmodule Idk.FlameWriter do
     </g>
     """
   end
-
-  defp duration([]), do: 0
-  defp duration(events), do: events |> Enum.map(& &1.at) |> Enum.max()
 
   defp color(index) do
     Enum.at(["#d9480f", "#f08c00", "#2b8a3e", "#1971c2", "#862e9c"], rem(index, 5))

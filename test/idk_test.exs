@@ -1,3 +1,18 @@
+defmodule IdkTest.SampleWorkload do
+  def run do
+    deadline = System.monotonic_time(:millisecond) + 20
+    spin(deadline, 0)
+  end
+
+  defp spin(deadline, value) do
+    if System.monotonic_time(:millisecond) < deadline do
+      spin(deadline, value + 1)
+    else
+      value
+    end
+  end
+end
+
 defmodule IdkTest do
   use ExUnit.Case
 
@@ -33,7 +48,9 @@ defmodule IdkTest do
         "--trace-start-event",
         "idk.profile.start",
         "--trace-stop-event",
-        "idk.profile.stop"
+        "idk.profile.stop",
+        "--sample-interval",
+        "2"
       ])
 
     assert opts.type == :call_memory
@@ -45,6 +62,7 @@ defmodule IdkTest do
     assert opts.trace_modules == ["Idk"]
     assert opts.trace_start_event == "idk.profile.start"
     assert opts.trace_stop_event == "idk.profile.stop"
+    assert opts.sample_interval == 2
     assert test_args == ["test/path_test.exs:42", "--seed", "123"]
   end
 
@@ -80,19 +98,24 @@ defmodule IdkTest do
         "A.f/1;B.g/2" => 3,
         "A.f/1" => 1
       },
-      events: [
-        {:open, self(), "A.f/1", 10},
-        {:open, self(), "B.g/2", 20},
-        {:close, self(), "A.f/1", 30},
-        {:close, self(), "root/0", 40}
-      ]
+      samples: %{
+        self() => [
+          %{at: 10, stack: ["A.f/1"]},
+          %{at: 20, stack: ["A.f/1", "B.g/2"]}
+        ]
+      }
     }
 
     assert Idk.FlameWriter.folded(profile.folded) =~ "A.f/1;B.g/2 3"
 
-    speedscope = Idk.FlameWriter.speedscope(profile.events)
-    assert speedscope =~ ~s("type":"evented")
+    speedscope = Idk.FlameWriter.speedscope(profile.samples)
+    assert speedscope =~ ~s("type":"sampled")
     assert speedscope =~ ~s("name":"A.f/1")
+
+    decoded = :json.decode(speedscope)
+    assert length(decoded["profiles"]) == 1
+    assert length(hd(decoded["profiles"])["samples"]) == 2
+    assert length(hd(decoded["profiles"])["weights"]) == 2
 
     svg = Idk.FlameWriter.svg(profile.folded)
     assert svg =~ "<svg"
@@ -100,26 +123,58 @@ defmodule IdkTest do
     assert svg =~ "<rect"
   end
 
+  test "speedscope writes one valid profile per BEAM process" do
+    other = spawn(fn -> :ok end)
+
+    speedscope =
+      Idk.FlameWriter.speedscope(%{
+        self() => [%{at: 10, stack: ["A.work/0"]}],
+        other => [%{at: 12, stack: ["B.work/0"]}]
+      })
+      |> :json.decode()
+
+    assert length(speedscope["profiles"]) == 2
+    assert Enum.all?(speedscope["profiles"], &(length(&1["samples"]) == 1))
+  end
+
   test "trace flame can be gated by telemetry events" do
     {_result, profile} =
       Idk.TraceFlame.profile(
         fn ->
           :telemetry.execute([:idk, :profile, :start], %{system_time: 1}, %{})
-          Idk.parse_type("call_count")
+          IdkTest.SampleWorkload.run()
           :telemetry.execute([:idk, :profile, :stop], %{duration: 2}, %{})
         end,
-        [Idk],
+        [IdkTest.SampleWorkload],
         trigger: {:telemetry, [:idk, :profile, :start], [:idk, :profile, :stop]}
       )
 
     assert profile.trigger == :telemetry
     assert length(profile.telemetry_events) == 2
-    assert profile.folded["Idk.parse_type/1"] == 1
+    assert profile.sample_count > 0
+    assert Enum.any?(Map.keys(profile.folded), &String.contains?(&1, "IdkTest.SampleWorkload"))
+  end
+
+  test "trace flame cleans up its sampler when the profiled function raises" do
+    links_before = Process.info(self(), :links)
+
+    assert_raise RuntimeError, "profile target failed", fn ->
+      Idk.TraceFlame.profile(
+        fn -> raise "profile target failed" end,
+        [IdkTest.SampleWorkload]
+      )
+    end
+
+    assert Process.info(self(), :links) == links_before
   end
 
   test "emits telemetry around profile target work" do
     :telemetry.execute([:idk, :profile, :start], %{system_time: 1}, %{})
     assert Idk.parse_type("call_count") == {:ok, :call_count}
     :telemetry.execute([:idk, :profile, :stop], %{duration: 2}, %{})
+  end
+
+  test "runs a large Enum workload for profiler smoke tests" do
+    assert Enum.map(1..100_000, &Function.identity/1) == Enum.to_list(1..100_000)
   end
 end
